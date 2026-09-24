@@ -1,71 +1,61 @@
-# =================================================================
-# STAGE 1: BUILDER (Kompilasi BadVPN UDPGW)
-# =================================================================
-FROM ubuntu:22.04 AS builder
+# Stage 1: Compile Script Golang + Build BadVPN UDPGW dari Source
+FROM golang:1.22-alpine AS builder
 
-ENV DEBIAN_FRONTEND=noninteractive
+# Install tools compile + curl
+RUN apk update && apk add --no-cache cmake make gcc g++ musl-dev linux-headers curl
 
-RUN apt-get update && apt-get install -y \
-    cmake \
-    make \
-    gcc \
-    g++ \
-    curl \
-    tar \
-    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
+# AMBIL SEMUA FILE dari repo GitHub lu ke dalam folder /app stage builder
+COPY . .
+
+# Proses build tetep lancar karena mux.go dan ws-proxy.go udah pasti ikut terbawa
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o mux mux.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o ws-proxy ws-proxy.go
+
+# Download dan compile badvpn-udpgw langsung dari source resmi
 WORKDIR /src
-
-# Download dan compile badvpn-udpgw dari release github
 RUN curl -fsSL https://github.com/ambrop72/badvpn/archive/refs/tags/1.999.130.tar.gz | tar -xz \
     && cd badvpn-1.999.130 \
     && mkdir build && cd build \
     && cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 \
-    && make badvpn-udpgw
+    && make badvpn-udpgw \
+    && cp udpgw/badvpn-udpgw /app/badvpn-udpgw
 
-# =================================================================
-# STAGE 2: RUNTIME (Pondasi Utama Aplikasi & Network Services)
-# =================================================================
-FROM ubuntu:22.04
 
-ENV DEBIAN_FRONTEND=noninteractive
+# Stage 2: Runner Image Utama Alpine (Tetap Ringan)
+FROM alpine:3.20
 
-# Install Node.js, Dropbear, Stunnel, jq, dan tools pendukung
-RUN apt-get update && apt-get install -y \
-    curl \
-    dropbear \
-    stunnel4 \
+RUN apk update && apk add --no-cache \
+    stunnel \
     openssl \
-    ca-certificates \
-    procps \
-    net-tools \
+    sudo \
+    curl \
     bash \
-    jq \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    openssh-server \
+    openssh-client \
+    gcompat
 
-# Unduh utilitas Cloudflared Resmi
-RUN curl -fsSL -o /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-    && chmod +x /usr/local/bin/cloudflared
-
-# Salin binary badvpn-udpgw dari stage builder
-COPY --from=builder /src/badvpn-1.999.130/build/udpgw/badvpn-udpgw /usr/local/bin/badvpn-udpgw
-RUN chmod +x /usr/local/bin/badvpn-udpgw
-
-# Atur Direktori Kerja Container
 WORKDIR /app
 
-# Salin package.json dan pasang dependensi NPM
-COPY package.json ./
-RUN npm install --omit=dev || npm install
+# 1. Salin semua binary terkompilasi dari folder /app milik Stage 1
+COPY --from=builder /app/mux /usr/local/bin/mux
+COPY --from=builder /app/ws-proxy /usr/local/bin/ws-proxy
+COPY --from=builder /app/badvpn-udpgw /usr/local/bin/badvpn-udpgw
 
-# Salin seluruh berkas proyek ke container
-COPY . .
+# 2. FITUR TAMBAHAN: Salin juga semua file mentah (script, konfigurasi, dll) dari Stage 1 ke folder aktif /app di runner
+COPY --from=builder /app /app
 
-# Berikan hak akses eksekusi script entrypoint
-RUN chmod +x start.sh
+# Install cloudflared (Argo Tunnel) untuk Linux AMD64
+RUN curl -fsSL -o /usr/local/bin/cloudflared \
+    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+    && chmod +x /usr/local/bin/cloudflared
 
-# Eksekusi utama saat container aktif (Berjalan penuh sebagai ROOT)
-CMD ["./start.sh"]
+RUN mkdir -p /var/run/sshd /var/run/stunnel /etc/stunnel
+
+# Mengambil entrypoint yang sudah tercopy ke folder /app
+RUN cp /app/entrypoint.sh /entrypoint.sh && chmod +x /entrypoint.sh
+
+EXPOSE 8080
+
+ENTRYPOINT ["/entrypoint.sh"]
