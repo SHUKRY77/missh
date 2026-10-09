@@ -1,0 +1,50 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip project
+        run: |
+          mkdir -p work
+          unzip -q -o project.zip -d work
+          GRADLEW=$(find work -name gradlew -type f | head -1)
+          echo "PROJECT_DIR=$(dirname "$GRADLEW")" >> $GITHUB_ENV
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          yes | "$SDKM" "platforms;android-32" "build-tools;30.0.3" > /dev/null || true
+
+      - name: Prepare
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          rm -f local.properties
+          chmod +x gradlew
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Build release APK
+        continue-on-error: true
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
