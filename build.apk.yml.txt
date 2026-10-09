@@ -1,0 +1,24 @@
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: unzip -q v2box-upload.zip
+      - name: Generate a release signing key
+        run: |
+          keytool -genkeypair -v -keystore v2box/app/release.keystore \
+            -alias v2box -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass v2boxrelease -keypass v2boxrelease \
+            -dname "CN=v2box, OU=v2box, O=v2box, L=, S=, C=US"
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.7 }
+      - run: gradle assembleDebug assembleRelease --no-daemon
+        working-directory: v2box
+      - uses: actions/upload-artifact@v4
+        with: { name: v2box-debug, path: v2box/app/build/outputs/apk/debug/*.apk }
+      - uses: actions/upload-artifact@v4
+        with: { name: v2box-release, path: v2box/app/build/outputs/apk/release/*.apk }
